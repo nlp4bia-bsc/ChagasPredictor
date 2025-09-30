@@ -16,8 +16,10 @@ from utils.evaluation import multilabel_eval
 
 comparison_ops = {
     'val_loss': operator.lt,
+    'ham_loss': operator.lt,
     'val_accuracy': operator.gt,
-    'val_weighted_f1': operator.gt
+    'val_macro_f1': operator.gt,
+    'val_weighted_f1': operator.gt,
 }
 
 def main(logger: logging.Logger, config: Dict):
@@ -112,18 +114,18 @@ def main(logger: logging.Logger, config: Dict):
             unwrapped_model = accelerator.unwrap_model(model)
             unwrapped_model.save_pretrained(config['training']['output_dir'], save_function=accelerator.save)
             tokenizer.save_pretrained(config['training']['output_dir'])
-            logger.info("New best model saved!")
+            logger.info(f"New best model saved in {config['training']['output_dir']}!")
             es_drag = 0
         else:
             es_drag += 1
             if es_drag >= es_patience:
                 logger.info(f"Early stopping triggered after {epoch+1} epochs.")
-                accelerator.wait_for_everyone()
-                best_config = RobertaConfig.from_pretrained(config['training']['output_dir'])
-                best_model = OverlapBERT.from_pretrained(config['training']['output_dir'], config=best_config)
-                best_model.to(device)
                 break
 
+    accelerator.wait_for_everyone()
+    best_config = RobertaConfig.from_pretrained(config['training']['output_dir'])
+    best_model = OverlapBERT.from_pretrained(config['training']['output_dir'], config=best_config)
+    best_model.to(device)
     # test
     test_loss, card_preds, dig_preds, card_actual, dig_actual = evaluate_model(
         best_model, test_loader, device

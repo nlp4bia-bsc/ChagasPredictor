@@ -100,7 +100,6 @@ def multilabel_eval(y_true: np.ndarray, y_pred: np.ndarray, logger, target_names
         'val_loss': None,
         'ham_loss': hamming,
         'val_accuracy': metrics_report['Subset']['accuracy'],
-        'val_micro_f1': metrics_report['Subset']['micro avg']['f1-score'],
         'val_macro_f1': metrics_report['Subset']['macro avg']['f1-score'],
         'val_weighted_f1': metrics_report['Subset']['weighted avg']['f1-score'],
     }

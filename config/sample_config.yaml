@@ -7,7 +7,6 @@ model:
   num_tasks: 2
   dropout: 0.
   max_length: 512
-  model_save_path: "saved_models/"
   freeze_bert: []
   label_names: ["storewide_query", "purchase_dispute"] # ['product_defect', 'storewide_query', 'shipping_issue', 'subscription_inquiry', 'account_access', 'troubleshoot_site', 'single_item_query', 'order_issue', 'purchase_dispute', 'manage_account']
 
@@ -17,7 +16,7 @@ training:
   batch_size: 4
   num_epochs: 1
   learning_rate: 2e-5
-  output_dir: "results/"
+  output_dir: "saved_models/"
   warmup_steps: 0
   weight_decay: 0.01
   scheduler_factor: 0.3
