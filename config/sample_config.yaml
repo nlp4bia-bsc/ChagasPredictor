@@ -1,0 +1,32 @@
+model:
+  pretrained_model: "/gpfs/projects/bsc14/erodrig/hub/models--allenai--biomed_roberta_base" 
+  tokenizer_path: "/gpfs/projects/bsc14/erodrig/hub/models--allenai--biomed_roberta_base/snapshots/0641aa1783909c6f94801601d4a166101f3d51a6" # dccuchile/bert-base-spanish-wwm-cased
+  class_name: "FineBERT"
+  classifier_layers: []
+  output_dim: 1
+  num_tasks: 2
+  dropout: 0.
+  max_length: 512
+  model_save_path: "saved_models/"
+  freeze_bert: []
+  label_names: ["storewide_query", "purchase_dispute"] # ['product_defect', 'storewide_query', 'shipping_issue', 'subscription_inquiry', 'account_access', 'troubleshoot_site', 'single_item_query', 'order_issue', 'purchase_dispute', 'manage_account']
+
+training:
+  loss: "BCEWithLogitsLoss"
+  optimizer: "AdamW"
+  batch_size: 4
+  num_epochs: 1
+  learning_rate: 2e-5
+  output_dir: "results/"
+  warmup_steps: 0
+  weight_decay: 0.01
+  scheduler_factor: 0.3
+  scheduler_patience: 2
+  device: "cuda"
+  early_stopping_patience: 5
+  early_stopping_metric: "val_weighted_f1"
+  dataset: "data/data_dir/abcd_v1.json"
+
+general:
+  log_dir: "logs/"
+  model_name: "SampleOverlappingClass"

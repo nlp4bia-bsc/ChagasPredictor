@@ -1,0 +1,12 @@
+random_notebooks/
+saved_models/
+results/
+batch_logs/
+logs/
+data/data_dir/*
+__pycache__/
+*.pyc
+.vscode/
+utils/model_manager.py
+main_test.ipynb
+config.yaml
