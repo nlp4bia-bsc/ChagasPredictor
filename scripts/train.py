@@ -23,7 +23,7 @@ comparison_ops = {
 }
 
 def main(logger: logging.Logger, config: Dict):
-    train_df, test_df, val_df = load_data(config['training']['dataset'])
+    train_df, test_df, val_df = load_data(config['general']['dataset'], config['general']['label_names'])
     
     tokenizer = AutoTokenizer.from_pretrained(config['model']['tokenizer_path'])
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -52,13 +52,13 @@ def main(logger: logging.Logger, config: Dict):
 
 
     # Create RobertaConfig for the hf pretrained model
-    hf_config = RobertaConfig.from_pretrained(config['model']['pretrained_model'])
+    hf_config = RobertaConfig.from_pretrained(config['model']['tokenizer_path'])
     hf_config.loss_fct = config['training']['loss']
     hf_config.output_dim = config['model']['output_dim']
     hf_config.num_tasks = config['model']['num_tasks']
     hf_config.freeze_bert = config['model']['freeze_bert']
     hf_config.classifier_dropout = config['model']['dropout']
-    model = OverlapBERT(hf_config)
+    model = OverlapBERT(hf_config, pretrained_model=config['model']['pretrained_model'])
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.to(device)
 

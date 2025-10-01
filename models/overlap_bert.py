@@ -1,28 +1,62 @@
 import torch
 import torch.nn as nn
-from transformers import RobertaForSequenceClassification, RobertaConfig
+from transformers import RobertaForSequenceClassification, RobertaConfig, RobertaModel
 from transformers.modeling_outputs import SequenceClassifierOutput
 
-
 class OverlapBERT(RobertaForSequenceClassification):
-    def __init__(self, config: RobertaConfig):
-        super(OverlapBERT, self).__init__(config)
+    def __init__(self, config: RobertaConfig, pretrained_model: str=None, **kwargs):
+        super().__init__(config)
         self.config = config
-        
-        # Freeze layers if specified
+        if pretrained_model:
+            base_model = RobertaModel.from_pretrained(
+                pretrained_model,
+                config=config,
+                local_files_only=kwargs.pop("local_files_only", False),
+            )
+
+            self.roberta.load_state_dict(base_model.state_dict(), strict=False)
+
         if len(self.config.freeze_bert) != 0: 
             self._freeze_bert_layers(self.config.freeze_bert)
 
         self.config.problem_type = "multi_label_classification"
         self.loss_fct = getattr(nn, self.config.loss_fct)()
-        
-        # Override the classifier to ensure correct output dimensions
-        # The parent class sets this up, but let's be explicit about multi-label
-        self.dropout = nn.Dropout(config.classifier_dropout if hasattr(config, 'classifier_dropout') else config.hidden_dropout_prob)
+
+        self.dropout = nn.Dropout(
+            config.classifier_dropout if hasattr(config, 'classifier_dropout') else config.hidden_dropout_prob
+        )
         self.classifier = nn.ModuleList([
-            nn.Linear(self.roberta.config.hidden_size, self.config.output_dim) # one head for each binary task
+            nn.Linear(self.roberta.config.hidden_size, self.config.output_dim)
             for _ in range(self.config.num_tasks)
         ])
+
+    # @classmethod
+    # def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
+    #     """
+    #     Custom from_pretrained to load pretrained RoBERTa weights into OverlapBERT.
+    #     Usage: OverlapBERT.from_pretrained("path/to/biomed_roberta")
+    #     """
+    #     # First, load config (respect overrides in kwargs)
+    #     config = kwargs.get("config", None)
+    #     if config is None:
+    #         config = RobertaConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
+
+    #     # Instantiate your custom model (random weights)
+    #     model = cls(config)
+
+    #     # Load backbone weights from HuggingFace checkpoint
+    #     base_model = RobertaModel.from_pretrained(
+    #         pretrained_model_name_or_path,
+    #         config=config,
+    #         local_files_only=kwargs.pop("local_files_only", False),
+    #     )
+
+
+    #     # Copy roberta weights into your custom model
+    #     model.roberta.load_state_dict(base_model.roberta.state_dict(), strict=False)
+
+    #     return model
+
 
     def _freeze_bert_layers(self, freeze_layer_names: list):
         # freeze by parameter name or layer index e.g. ['embeddings', 'encoder.layer.0']

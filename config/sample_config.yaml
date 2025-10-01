@@ -1,5 +1,5 @@
 model:
-  pretrained_model: "/gpfs/projects/bsc14/erodrig/hub/models--allenai--biomed_roberta_base" 
+  pretrained_model: "/gpfs/projects/bsc14/erodrig/hub/models--allenai--biomed_roberta_base/snapshots/ffc2f2def99bdbc9e924f65a10d7326150a3d550" 
   tokenizer_path: "/gpfs/projects/bsc14/erodrig/hub/models--allenai--biomed_roberta_base/snapshots/0641aa1783909c6f94801601d4a166101f3d51a6" # dccuchile/bert-base-spanish-wwm-cased
   class_name: "FineBERT"
   classifier_layers: []
@@ -8,7 +8,6 @@ model:
   dropout: 0.
   max_length: 512
   freeze_bert: []
-  label_names: ["storewide_query", "purchase_dispute"] # ['product_defect', 'storewide_query', 'shipping_issue', 'subscription_inquiry', 'account_access', 'troubleshoot_site', 'single_item_query', 'order_issue', 'purchase_dispute', 'manage_account']
 
 training:
   loss: "BCEWithLogitsLoss"
@@ -24,8 +23,9 @@ training:
   device: "cuda"
   early_stopping_patience: 5
   early_stopping_metric: "val_weighted_f1"
-  dataset: "data/data_dir/abcd_v1.json"
 
 general:
   log_dir: "logs/"
   model_name: "SampleOverlappingClass"
+  dataset: "data/data_dir/abcd_v1.json"
+  label_names: ["storewide_query", "purchase_dispute"] # ['product_defect', 'storewide_query', 'shipping_issue', 'subscription_inquiry', 'account_access', 'troubleshoot_site', 'single_item_query', 'order_issue', 'purchase_dispute', 'manage_account']

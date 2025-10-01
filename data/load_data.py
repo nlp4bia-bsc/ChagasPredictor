@@ -39,7 +39,7 @@ def json2df(json_item):
     df['label'] = [json_item['scenario']['flow']]
     return df
 
-def load_data(path): # currently filters storewide_query and purchase_dispute
+def load_data(path, label_names): # currently filters storewide_query and purchase_dispute
     with open(path) as f:
         data = json.load(f)
 
@@ -53,7 +53,11 @@ def load_data(path): # currently filters storewide_query and purchase_dispute
         print(f"finished split {split}")
 
 
-    df = df[(df['label']=='storewide_query') | (df['label']=='purchase_dispute')]
-    df['card'] = df['label'].map({'storewide_query': 0, 'purchase_dispute': 1})
-    df['dig'] = df['label'].map({'storewide_query': 1, 'purchase_dispute': 0})
+    df = df[df['label'].isin(label_names)]
+
+    card_map = {label: int(i==label_names[0]) for i, label in enumerate(label_names)}
+    dig_map = {label: int(i==label_names[1]) for i, label in enumerate(label_names)}
+    df['card'] = df['label'].map(card_map)
+    df['dig'] = df['label'].map(dig_map)
+    
     return df[df['split']=='train'], df[df['split']=='test'], df[df['split']=='dev']
