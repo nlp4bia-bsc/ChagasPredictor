@@ -55,8 +55,8 @@ def load_data(path, label_names): # currently filters storewide_query and purcha
 
     df = df[df['label'].isin(label_names)]
 
-    card_map = {label: int(i==label_names[0]) for i, label in enumerate(label_names)}
-    dig_map = {label: int(i==label_names[1]) for i, label in enumerate(label_names)}
+    card_map = {label: int(label==label_names[0]) for label in label_names}
+    dig_map = {label: int(label==label_names[1]) for label in label_names}
     df['card'] = df['label'].map(card_map)
     df['dig'] = df['label'].map(dig_map)
     

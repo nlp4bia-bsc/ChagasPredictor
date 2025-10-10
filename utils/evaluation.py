@@ -4,6 +4,7 @@ from sklearn.metrics import (
     hamming_loss
 )
 from typing import Dict
+import pandas as pd
 
 def order_combs(combs):
     final_combs = []

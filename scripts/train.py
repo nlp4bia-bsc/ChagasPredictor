@@ -7,8 +7,9 @@ from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from transformers import AutoTokenizer, RobertaConfig, get_scheduler
 import operator
+import os
 
-from models.overlap_bert import OverlapBERT
+from models.overlap_bert import MeanBERT, LSTMBERT
 from data.dataset import OverlapDataset, collate_cases
 from data.load_data import load_data
 from pipeline.multi_bert import train_epoch, evaluate_model
@@ -22,11 +23,13 @@ comparison_ops = {
     'val_weighted_f1': operator.gt,
 }
 
-def main(logger: logging.Logger, config: Dict):
+def main(logger: logging.Logger, config: Dict, method: str):
     train_df, test_df, val_df = load_data(config['general']['dataset'], config['general']['label_names'])
     
     tokenizer = AutoTokenizer.from_pretrained(config['model']['tokenizer_path'])
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    output_dir = os.path.join(config['training']['output_dir'], method)
 
     # Create datasets and dataloaders
     train_dataset = OverlapDataset(train_df['visits'].to_list(), train_df['card'].to_list(), train_df['dig'].to_list())
@@ -58,7 +61,11 @@ def main(logger: logging.Logger, config: Dict):
     hf_config.num_tasks = config['model']['num_tasks']
     hf_config.freeze_bert = config['model']['freeze_bert']
     hf_config.classifier_dropout = config['model']['dropout']
-    model = OverlapBERT(hf_config, pretrained_model=config['model']['pretrained_model'])
+    if method == 'mean':
+        model = MeanBERT(hf_config, pretrained_model=config['model']['pretrained_model'])
+    elif method == 'lstm':
+        hf_config.lstm_hidden = 256
+        model = LSTMBERT(hf_config, pretrained_model=config['model']['pretrained_model'])
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.to(device)
 
@@ -112,9 +119,9 @@ def main(logger: logging.Logger, config: Dict):
             best_es_metric_val = val_metrics['es'][es_metric]
             accelerator.wait_for_everyone()
             unwrapped_model = accelerator.unwrap_model(model)
-            unwrapped_model.save_pretrained(config['training']['output_dir'], save_function=accelerator.save)
-            tokenizer.save_pretrained(config['training']['output_dir'])
-            logger.info(f"New best model saved in {config['training']['output_dir']}!")
+            unwrapped_model.save_pretrained(output_dir, save_function=accelerator.save)
+            tokenizer.save_pretrained(output_dir)
+            logger.info(f"New best model saved in {output_dir}!")
             es_drag = 0
         else:
             es_drag += 1
@@ -123,8 +130,11 @@ def main(logger: logging.Logger, config: Dict):
                 break
 
     accelerator.wait_for_everyone()
-    best_config = RobertaConfig.from_pretrained(config['training']['output_dir'])
-    best_model = OverlapBERT.from_pretrained(config['training']['output_dir'], config=best_config)
+    best_config = RobertaConfig.from_pretrained(output_dir)
+    if method == 'mean':
+        best_model = MeanBERT.from_pretrained(output_dir, config=best_config)
+    if method == 'lstm':
+        best_model = LSTMBERT.from_pretrained(output_dir, config=best_config)
     best_model.to(device)
     # test
     test_loss, card_preds, dig_preds, card_actual, dig_actual = evaluate_model(

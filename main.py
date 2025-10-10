@@ -9,6 +9,14 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description="Run the script.")
 
     parser.add_argument(
+        "--method", 
+        type=str, 
+        default="mean",
+        choices=["mean", "lstm"],
+        help="Choose the method of embedding collapse"
+    )
+
+    parser.add_argument(
         "--action", 
         type=str, 
         default="train",
@@ -40,7 +48,7 @@ def main(args):
         "train": train_main
     }
 
-    script_execution[args.action](logger, config)
+    script_execution[args.action](logger, config, args.method)
 
 if __name__ == "__main__":
     args = parse_arguments()
