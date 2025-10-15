@@ -66,6 +66,10 @@ def main(logger: logging.Logger, config: Dict, method: str):
     elif method == 'lstm':
         hf_config.lstm_hidden = 256
         model = LSTMBERT(hf_config, pretrained_model=config['model']['pretrained_model'])
+    elif method == 'lstm-attn':
+        hf_config.lstm_hidden = 256
+        hf_config.attn_dim = 128
+        model = LSTMBERT(hf_config, pretrained_model=config['model']['pretrained_model'])
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.to(device)
 
@@ -133,7 +137,7 @@ def main(logger: logging.Logger, config: Dict, method: str):
     best_config = RobertaConfig.from_pretrained(output_dir)
     if method == 'mean':
         best_model = MeanBERT.from_pretrained(output_dir, config=best_config)
-    if method == 'lstm':
+    if method == 'lstm' or method =='lstm-attn':
         best_model = LSTMBERT.from_pretrained(output_dir, config=best_config)
     best_model.to(device)
     # test

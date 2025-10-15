@@ -12,7 +12,7 @@ def parse_arguments():
         "--method", 
         type=str, 
         default="mean",
-        choices=["mean", "lstm"],
+        choices=["mean", "lstm", "lstm-attn"],
         help="Choose the method of embedding collapse"
     )
 

@@ -124,6 +124,17 @@ class LSTMBERT(RobertaForSequenceClassification):
         # LSTM: bidirectional -> hidden dim doubles in outputs
         self.lstm = nn.LSTM(self.roberta.config.hidden_size, self.config.lstm_hidden, batch_first=True, bidirectional=True)
 
+        # Attention pooling hyperparam (config.attn_dim or default)
+        attn_dim = getattr(self.config, "attn_dim", False)
+        if attn_dim:
+            self.use_attn = True
+            # attention: (B, M, 2*lstm_hidden) -> (B, M, 1)
+            self.attn = nn.Sequential(
+                nn.Linear(self.config.lstm_hidden * 2, attn_dim),
+                nn.Tanh(),
+                nn.Linear(attn_dim, 1)
+            )
+
         # **Important**: classifier must accept 2 * lstm_hidden because LSTM is bidirectional
         self.classifier = nn.ModuleList([
             nn.Linear(self.config.lstm_hidden * 2, self.config.output_dim)
@@ -161,6 +172,7 @@ class LSTMBERT(RobertaForSequenceClassification):
 
         # mask padded visits (B, M)
         visit_mask = visit_exists.view(B, M).to(pooled_visits.dtype)  # 1.0 for real visits, 0.0 for padded visits
+        visit_mask_bool = visit_mask.to(torch.bool)  # for masking scores
 
         # compute lengths (number of real visits per sample)
         lengths = visit_mask.sum(dim=1).to(torch.long)  # (B,)
@@ -177,12 +189,24 @@ class LSTMBERT(RobertaForSequenceClassification):
         packed_out, (h_n, c_n) = self.lstm(packed)
         out_unpacked, _ = pad_packed_sequence(packed_out, batch_first=True, total_length=M)  # convert back to (B, M, 2*lstm_hidden)
 
-        # gather last valid timestep for each sequence (lengths_clamped - 1)
-        last_idxs = (lengths_clamped - 1).to(torch.long)  # (B,)
-        batch_idx = torch.arange(B, device=pooled_visits.device)
-        lstm_last = out_unpacked[batch_idx, last_idxs, :]  # (B, 2*lstm_hidden)
+        if self.use_attn:
+            # Attention pooling over the M timesteps (visits)
+            # compute raw scores (B, M, 1)
+            scores = self.attn(out_unpacked).squeeze(-1)  # (B, M)
+            # mask padded positions: set to large negative so softmax ~ 0
+            scores = scores.masked_fill(~visit_mask_bool, -1e9)
+            weights = torch.softmax(scores, dim=1)  # (B, M)
+            # weighted sum
+            weights_unsq = weights.unsqueeze(-1)  # (B, M, 1)
+            pooled = (weights_unsq * out_unpacked).sum(dim=1)  # (B, 2*lstm_hidden)
 
-        x = self.dropout(lstm_last)  # (B, 2*lstm_hidden)
+        else:
+            # gather last valid timestep for each sequence (lengths_clamped - 1)
+            last_idxs = (lengths_clamped - 1).to(torch.long)  # (B,)
+            batch_idx = torch.arange(B, device=pooled_visits.device)
+            pooled = out_unpacked[batch_idx, last_idxs, :]  # (B, 2*lstm_hidden)
+
+        x = self.dropout(pooled)  # (B, 2*lstm_hidden)
 
         logits = [head(x) for head in self.classifier]    # each element (B, output_dim)
 

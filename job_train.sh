@@ -21,5 +21,5 @@ export TQDM_MININTERVAL=10
 
 conda activate /gpfs/scratch/bsc14/.conda/envs/bertfine
 
-/gpfs/scratch/bsc14/.conda/envs/bertfine/bin/python main.py --method lstm 
+/gpfs/scratch/bsc14/.conda/envs/bertfine/bin/python main.py --method lstm-attn 
 
