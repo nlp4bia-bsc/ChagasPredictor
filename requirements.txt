@@ -6,3 +6,4 @@ accelerate
 scikit-learn
 matplotlib
 pyyaml
+pickle
