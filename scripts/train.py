@@ -10,10 +10,10 @@ import operator
 import os
 
 from models.overlap_bert import MeanBERT, LSTMBERT
-from data.dataset import OverlapDataset, collate_cases
-from data.load_data import load_data
+from data.dataset import OverlapDataset, collate_cases, DateVisitsDataset, collate_cases_time
+from data.load_data import load_real_data
 from pipeline.multi_bert import train_epoch, evaluate_model
-from utils.evaluation import multilabel_eval
+from utils.evaluation import singlelabel_eval
 
 comparison_ops = {
     'val_loss': operator.lt,
@@ -24,33 +24,38 @@ comparison_ops = {
 }
 
 def main(logger: logging.Logger, config: Dict, method: str):
-    train_df, test_df, val_df = load_data(config['general']['dataset'], config['general']['label_names'])
-    
+    train_df, test_df, val_df = load_real_data(
+        config['general']['dataset'], stratify_col='label', 
+        test_size=0.2, dev_size=0.1, no_dig= True if config['model']['output_dim']==2 else False)
+
     tokenizer = AutoTokenizer.from_pretrained(config['model']['tokenizer_path'])
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print("Using device", device)
 
     output_dir = os.path.join(config['training']['output_dir'], method)
+    os.makedirs(output_dir, exist_ok=True)
+    model_dir = os.path.join(output_dir, str(len(os.listdir(output_dir))))
 
     # Create datasets and dataloaders
-    train_dataset = OverlapDataset(train_df['visits'].to_list(), train_df['card'].to_list(), train_df['dig'].to_list())
-    val_dataset = OverlapDataset(val_df['visits'].to_list(), val_df['card'].to_list(), val_df['dig'].to_list())
-    test_dataset = OverlapDataset(test_df['visits'].to_list(), test_df['card'].to_list(), test_df['dig'].to_list())
+    train_dataset = DateVisitsDataset(train_df['visits'].to_list(), train_df['dates'].to_list(), train_df['label'].to_list())
+    val_dataset = DateVisitsDataset(val_df['visits'].to_list(), val_df['dates'].to_list(), val_df['label'].to_list())
+    test_dataset = DateVisitsDataset(test_df['visits'].to_list(), test_df['dates'].to_list(), test_df['label'].to_list())
 
     train_loader = DataLoader(
         train_dataset, 
         batch_size=config['training']['batch_size'], 
         shuffle=True, 
-        collate_fn=lambda b: collate_cases(b, tokenizer, max_length=512)
+        collate_fn=lambda b: collate_cases_time(b, tokenizer, max_length=512)
         )
     val_loader = DataLoader(
         val_dataset, 
         batch_size=config['training']['batch_size'], 
-        collate_fn=lambda b: collate_cases(b, tokenizer, max_length=512)
+        collate_fn=lambda b: collate_cases_time(b, tokenizer, max_length=512)
         )
     test_loader = DataLoader(
         test_dataset, 
         batch_size=config['training']['batch_size'], 
-        collate_fn=lambda b: collate_cases(b, tokenizer, max_length=512)
+        collate_fn=lambda b: collate_cases_time(b, tokenizer, max_length=512)
         )
 
 
@@ -61,6 +66,7 @@ def main(logger: logging.Logger, config: Dict, method: str):
     hf_config.num_tasks = config['model']['num_tasks']
     hf_config.freeze_bert = config['model']['freeze_bert']
     hf_config.classifier_dropout = config['model']['dropout']
+    hf_config.visit_time_proj = config['model']['visit_time_proj']
     if method == 'mean':
         model = MeanBERT(hf_config, pretrained_model=config['model']['pretrained_model'])
     elif method == 'lstm':
@@ -71,11 +77,18 @@ def main(logger: logging.Logger, config: Dict, method: str):
         hf_config.attn_dim = 128
         model = LSTMBERT(hf_config, pretrained_model=config['model']['pretrained_model'])
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model.to(device)
+    # model.to(device)
 
     # Initialize training methods
-    accelerator = Accelerator()
-    optimizer = AdamW(model.parameters(), lr=config['training']['learning_rate'])
+    accelerator = Accelerator(gradient_accumulation_steps=8)
+    if method == 'mean':
+        optimizer = AdamW(model.parameters(), lr=config['training']['encoder_learning_rate'])
+    else:
+        optimizer = AdamW([
+            {'params': model.roberta.encoder.parameters(), 'lr': config['training']['encoder_learning_rate']},
+            {'params': model.lstm.parameters(), 'lr': config['training']['lstm_learning_rate']},
+            {'params': model.classifier.parameters(), 'lr': config['training']['classifier_learning_rate']}
+        ])
 
     num_epochs = config['training']['num_epochs']
     num_training_steps = num_epochs * len(train_loader)
@@ -98,34 +111,34 @@ def main(logger: logging.Logger, config: Dict, method: str):
         logger.info("-" * 50)
         
         # Train
-        train_loss, card_train_loss, dig_train_loss = train_epoch(
+        train_loss = train_epoch(
             model, train_loader, optimizer, scheduler, device
         )
-        logger.info(f"Train Loss: {train_loss:.4f} (card: {card_train_loss:.4f}, dig: {dig_train_loss:.4f})")
+        logger.info(f"Train Loss: {train_loss:.4f}")
         
         # Evaluate
-        val_loss, card_preds, dig_preds, card_actual, dig_actual = evaluate_model(
+        val_loss, preds, actual = evaluate_model(
             model, val_loader, device
         )
         logger.info(f"Val Loss: {val_loss:.4f}")
 
-        val_metrics = multilabel_eval(
-            np.array([(int(c), int(d)) for c, d in zip(card_actual, dig_actual)]),
-            np.array([(c, d) for c, d in zip(card_preds, dig_preds)]),
-            logger, 
-            target_names=['Cardiological', 'Digestive'], 
-            multi_task_target_names=['Neither', 'Cardiological Only', 'Digestive Only', 'Mixed']
+        val_metrics = singlelabel_eval(
+            np.array(actual),
+            np.array(preds),
+            logging.getLogger(),
+            target_names=['Neither', 'Cardiological Only', 'Digestive Only',]
         )
         val_metrics['es']['val_loss'] = val_loss  
+        logger.info(f"Val {es_metric}: {val_metrics['es'][es_metric]:.4f}")
 
         # Save best model based on average F1 score
         if es_compare(val_metrics['es'][es_metric], best_es_metric_val) or epoch == 0:
             best_es_metric_val = val_metrics['es'][es_metric]
             accelerator.wait_for_everyone()
             unwrapped_model = accelerator.unwrap_model(model)
-            unwrapped_model.save_pretrained(output_dir, save_function=accelerator.save)
-            tokenizer.save_pretrained(output_dir)
-            logger.info(f"New best model saved in {output_dir}!")
+            unwrapped_model.save_pretrained(model_dir, save_function=accelerator.save)
+            tokenizer.save_pretrained(model_dir)
+            logger.info(f"New best model saved in {model_dir}!")
             es_drag = 0
         else:
             es_drag += 1
@@ -134,25 +147,33 @@ def main(logger: logging.Logger, config: Dict, method: str):
                 break
 
     accelerator.wait_for_everyone()
-    best_config = RobertaConfig.from_pretrained(output_dir)
+    best_config = RobertaConfig.from_pretrained(model_dir)
     if method == 'mean':
-        best_model = MeanBERT.from_pretrained(output_dir, config=best_config)
+        best_model = MeanBERT.from_pretrained(model_dir, config=best_config)
     if method == 'lstm' or method =='lstm-attn':
-        best_model = LSTMBERT.from_pretrained(output_dir, config=best_config)
+        best_model = LSTMBERT.from_pretrained(model_dir, config=best_config)
     best_model.to(device)
     # test
-    test_loss, card_preds, dig_preds, card_actual, dig_actual = evaluate_model(
-        best_model, test_loader, device
+    test_loss, preds, actual = evaluate_model(
+        best_model, test_loader, device, test=True
     )
     # Final evaluation
     logger.info("\nTest Set Evaluation:")
     logger.info(f"Val Loss: {test_loss:.4f}")
-    val_metrics = multilabel_eval(
-        np.array([(int(c), int(d)) for c, d in zip(card_actual, dig_actual)]),
-        np.array([(c, d) for c, d in zip(card_preds, dig_preds)]),
-        logger, 
-        target_names=['Cardiological', 'Digestive'], 
-        multi_task_target_names=['Neither', 'Cardiological Only', 'Digestive Only', 'Mixed']
-    )
+    if config['model']['output_dim'] == 3:
+        val_metrics = singlelabel_eval(
+            np.array(actual),
+            np.array(preds),
+            logging.getLogger(),
+            target_names=['Neither', 'Cardiological Only', 'Digestive Only']
+        )
+    elif config['model']['output_dim'] == 2:
+        val_metrics = singlelabel_eval(
+            np.array(actual),
+            np.array(preds),
+            logging.getLogger(),
+            target_names=['Asymptomatic', 'Cardiological']
+        )
+
 if __name__ == "__main__":
     main()

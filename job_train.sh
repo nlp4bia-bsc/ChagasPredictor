@@ -1,25 +1,30 @@
-#!/bin/bash
-#SBATCH --job-name=predict_train
+#! /bin/bash
+#SBATCH --job-name=chagas_pred
 #SBATCH -D .
-#SBATCH -A bsc14
-#SBATCH --qos=acc_debug
+#SBATCH --partition=gpu
+#SBATCH --account=unlimited
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH  --gpus=1
 #SBATCH --output=batch_logs/%j.out
 #SBATCH --error=batch_logs/%j.err
-#SBATCH --ntasks=1
-#SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=32
-#SBATCH --time=2:00:00
 
-## --qos=acc_bscls
-module load anaconda
+# Clear the environment from any previously loaded modules
+module purge > /dev/null 2>&1
+
+module load lang/Miniconda3/24.7.1-0
+conda init
+module load system/CUDA/12.9.1
 
 # Initialize conda for bash shell
 conda init bash
 source ~/.bashrc  # This reloads the shell to apply conda settings
 
 export TQDM_MININTERVAL=10
+export PYTORCH_ALLOC_CONF=expandable_segments:True
 
-conda activate /gpfs/scratch/bsc14/.conda/envs/bertfine
+source activate chagas_pred
 
-/gpfs/scratch/bsc14/.conda/envs/bertfine/bin/python main.py --method lstm-attn 
+python main.py --method lstm-attn
 

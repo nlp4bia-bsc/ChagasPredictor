@@ -2,12 +2,8 @@ import torch
 from torch import nn
 import numpy as np
 from tqdm import tqdm
-from typing import Dict
-import logging
-import time
-from accelerate import Accelerator
-from pathlib import Path
 import operator
+import pickle
 
 from utils.evaluation import multilabel_eval
 # Define which comparison to use for each metric
@@ -20,24 +16,22 @@ comparison_ops = {
 def train_epoch(model, data_loader, optimizer, scheduler, device):
     model.train()
     total_loss = 0.0
-    card_losses = 0.0
-    dig_losses = 0.0
     n_batches = len(data_loader)
 
     for batch in tqdm(data_loader, desc="Training"):
         input_ids = batch['input_ids'].to(device)
         attention_mask = batch['attention_mask'].to(device)
-        card_labels = batch['card_labels'].to(device)
-        dig_labels = batch['dig_labels'].to(device)
+        visit_times = batch['visit_times'].to(device)
+        labels = batch['labels'].to(device)
 
         optimizer.zero_grad()
 
         # Forward pass
-        output, card_loss, dig_loss = model(
+        output, _ = model(
             input_ids=input_ids, 
             attention_mask=attention_mask, 
-            card_labels=card_labels,
-            dig_labels=dig_labels)
+            visit_times=visit_times,
+            labels=labels)
 
         output.loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -48,20 +42,17 @@ def train_epoch(model, data_loader, optimizer, scheduler, device):
             scheduler.step()
 
         total_loss += output.loss.item()
-        card_losses += card_loss.item()
-        dig_losses += dig_loss.item()
 
-    return (total_loss / n_batches,
-            card_losses / n_batches,
-            dig_losses / n_batches)
+        del output
+        torch.cuda.empty_cache()
 
+    return total_loss / n_batches
 
-def evaluate_model(model, data_loader, device):
+def evaluate_model(model, data_loader, device, test=False):
     model.eval()
-    card_predictions = []
-    dig_predictions = []
-    card_actual = []
-    dig_actual = []
+    predictions = []
+    actual = []
+    attn_weights_list = []
     total_loss = 0.0
     n_batches = len(data_loader)
 
@@ -69,30 +60,30 @@ def evaluate_model(model, data_loader, device):
         for batch in tqdm(data_loader, desc="Evaluating"):
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
-            card_labels = batch['card_labels'].to(device)
-            dig_labels = batch['dig_labels'].to(device)
+            visit_times = batch['visit_times'].to(device)
+            labels = batch['labels'].to(device)
 
             # Forward pass
-            output, _, _ = model(
+            output, attn_weights = model(
                 input_ids=input_ids, 
-                attention_mask=attention_mask, 
-                card_labels=card_labels,
-                dig_labels=dig_labels)
+                attention_mask=attention_mask,
+                visit_times=visit_times,
+                labels=labels,
+                get_attention_weights=test
+            )
             
             total_loss += output.loss.item()
+            if test:
+                attn_weights_list += attn_weights
 
-            # Get predictions (assuming binary classification with logits)
-            card_probs = torch.sigmoid(output.logits[0])
-            dig_probs = torch.sigmoid(output.logits[1])
-            card_pred = (card_probs >= 0.5).long().squeeze()
-            dig_pred = (dig_probs >= 0.5).long().squeeze()
-
-            card_predictions.extend(card_pred.tolist())
-            dig_predictions.extend(dig_pred.tolist())
-            card_actual.extend(card_labels.cpu().numpy().tolist())
-            dig_actual.extend(dig_labels.cpu().numpy().tolist())
-
+            # Get predictions (assuming multi-class classification with logits)
+            probs = nn.Softmax(dim=1)(output.logits[0])  # (B, num_classes)
+            pred = torch.argmax(probs, dim=1)  # (B,)
+            pred = pred.cpu()
+            predictions.extend(pred.tolist())
+            actual.extend(labels.cpu().numpy().tolist())
+    
+    with open("attention_weights.pickle", 'wb') as f:
+        pickle.dump(attn_weights_list, f)
     avg_loss = total_loss / n_batches
-    return (avg_loss,
-            np.array(card_predictions), np.array(dig_predictions),
-            np.array(card_actual), np.array(dig_actual))
+    return (avg_loss, np.array(predictions), np.array(actual))

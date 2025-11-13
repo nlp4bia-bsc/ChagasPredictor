@@ -17,6 +17,7 @@ class MeanBERT(RobertaForSequenceClassification):
             self.roberta.load_state_dict(base_model.state_dict(), strict=False)
 
         if len(self.config.freeze_bert) != 0: 
+            self.config.freeze_bert = [str(layer) for layer in self.config.freeze_bert]
             self._freeze_bert_layers(self.config.freeze_bert)
 
         self.config.problem_type = "multi_label_classification"
@@ -36,7 +37,7 @@ class MeanBERT(RobertaForSequenceClassification):
             if any(fl in name for fl in freeze_layer_names):
                 param.requires_grad = False
 
-    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, card_labels: torch.Tensor, dig_labels: torch.Tensor, visit_chunk_size: int = 128):
+    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, labels: torch.Tensor, visit_times: torch.Tensor=None, visit_chunk_size: int = 8):
         """
         input_ids: (B, M, S) long
         attention_mask: (B, M, S) long
@@ -77,25 +78,14 @@ class MeanBERT(RobertaForSequenceClassification):
         avg_cls = summed / denom                                # (B, hidden)
         avg_cls = self.dropout(avg_cls)
 
-        # heads -> list of logits per task
-        logits = [head(avg_cls) for head in self.classifier]    # each element (B, 1)
-        total_loss, card_loss, dig_loss = self.compute_multitask_loss(logits, card_labels, dig_labels)
-        
-        return (SequenceClassifierOutput(
+        logits = [head(avg_cls) for head in self.classifier]    # each element (B, output_dim)
+
+        total_loss = self.loss_fct(logits[0], labels)
+
+        return SequenceClassifierOutput(
             loss=total_loss,
             logits=logits
-        ), card_loss, dig_loss)
-
-    def compute_multitask_loss(self, task_logits, card_labels, dig_labels, weights=(1.0, 1.0)):
-        """
-        task_logits: list [logits_card, logits_dig] each shape (B, 2)
-        card_labels, dig_labels: (B,) long (0/1)
-        weights: tuple of floats to weight task losses
-        """
-        card_loss = self.loss_fct(task_logits[0], card_labels.unsqueeze(1))
-        dig_loss = self.loss_fct(task_logits[1], dig_labels.unsqueeze(1))
-        total_loss = weights[0] * card_loss + weights[1] * dig_loss
-        return total_loss, card_loss, dig_loss
+        )
 
 
 class LSTMBERT(RobertaForSequenceClassification):
@@ -112,20 +102,32 @@ class LSTMBERT(RobertaForSequenceClassification):
             self.roberta.load_state_dict(base_model.state_dict(), strict=False)
 
         if len(self.config.freeze_bert) != 0:
+            self.config.freeze_bert = [str(layer) for layer in self.config.freeze_bert]
             self._freeze_bert_layers(self.config.freeze_bert)
 
-        self.config.problem_type = "multi_label_classification"
-        self.loss_fct = getattr(nn, self.config.loss_fct)()
+        # projection from BERT hidden -> lstm_hidden to stabilize / reduce params
+        # self.project = nn.Sequential(
+        #     nn.Linear(self.roberta.config.hidden_size, self.config.lstm_hidden),
+        #     nn.LayerNorm(self.config.lstm_hidden),
+        #     nn.ReLU(),
+        # )
 
-        self.dropout = nn.Dropout(
-            config.classifier_dropout if hasattr(config, 'classifier_dropout') else config.hidden_dropout_prob
-        )
+        # optionally include extra per-visit numeric features (e.g. time delta)
+        # set config.visit_feat_dim = 0 if none
+        self.visit_time_proj = getattr(self.config, "visit_time_proj", 0)
+        self.visit_feat_proj = torch.nn.Linear(2, self.visit_time_proj)
 
-        # LSTM: bidirectional -> hidden dim doubles in outputs
-        self.lstm = nn.LSTM(self.roberta.config.hidden_size, self.config.lstm_hidden, batch_first=True, bidirectional=True)
+        lstm_input_dim = self.roberta.config.hidden_size + self.visit_time_proj
+
+        # LSTM: allow num_layers and dropout between layers
+        self.lstm = nn.LSTM(lstm_input_dim, self.config.lstm_hidden,
+                            batch_first=True, bidirectional=True,
+                            num_layers=getattr(self.config, "lstm_layers", 1),
+                            dropout=getattr(self.config, "lstm_dropout", 0.0))
 
         # Attention pooling hyperparam (config.attn_dim or default)
         attn_dim = getattr(self.config, "attn_dim", False)
+        self.use_attn = bool(attn_dim)
         if attn_dim:
             self.use_attn = True
             # attention: (B, M, 2*lstm_hidden) -> (B, M, 1)
@@ -135,13 +137,25 @@ class LSTMBERT(RobertaForSequenceClassification):
                 nn.Linear(attn_dim, 1)
             )
 
+        self.dropout = nn.Dropout(
+            config.classifier_dropout if hasattr(config, 'classifier_dropout') else config.hidden_dropout_prob
+        )
+
         # **Important**: classifier must accept 2 * lstm_hidden because LSTM is bidirectional
         self.classifier = nn.ModuleList([
             nn.Linear(self.config.lstm_hidden * 2, self.config.output_dim)
             for _ in range(self.config.num_tasks)
         ])
 
-    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, card_labels: torch.Tensor, dig_labels: torch.Tensor, visit_chunk_size: int = 128):
+        self.loss_fct = getattr(nn, getattr(self.config, "loss_fct", "BCEWithLogitsLoss"))()
+
+    def _freeze_bert_layers(self, freeze_layer_names: list):
+        # freeze by parameter name or layer index e.g. ['embeddings', 'encoder.layer.0']
+        for name, param in self.roberta.named_parameters():
+            if any(fl in name for fl in freeze_layer_names):
+                param.requires_grad = False
+
+    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, labels: torch.Tensor, visit_times: torch.Tensor=None, visit_chunk_size: int = 4, get_attn_weights=False):
         """
         input_ids: (B, M, S)
         attention_mask: (B, M, S)
@@ -153,25 +167,37 @@ class LSTMBERT(RobertaForSequenceClassification):
         # flatten visits => (B*M, S)
         flat_input = input_ids.view(B * M, S)
         flat_attn  = attention_mask.view(B * M, S)
-
         # mask which flattened visits are real (sum attn > 0)
         visit_exists = (flat_attn.sum(dim=-1) > 0).to(torch.float32)  # (B*M,)
-
         # process visits in chunks to control memory; collect pooled outputs (CLS)
         pooled_chunks = []
         for start in range(0, B * M, visit_chunk_size):
             end = min(B * M, start + visit_chunk_size)
-            out = self.roberta(input_ids=flat_input[start:end], attention_mask=flat_attn[start:end], return_dict=True)
+            input_chunk = flat_input[start:end]
+            attn_chunk = flat_attn[start:end]              # <-- slice attention mask
+            out = self.roberta(input_ids=input_chunk, attention_mask=attn_chunk, return_dict=True)
+            # last_hidden = out.last_hidden_state            # (chunk, seq_len, hidden)
+            # out = self.roberta(input_ids=flat_input[start:end], attention_mask=flat_attn[start:end], return_dict=True)
             last_hidden = out.last_hidden_state          # (chunk, seq_len, hidden)
-            cls_vec = last_hidden[:, 0, :]               # (chunk, hidden)
+            # cls_vec = last_hidden[:, 0, :]               # (chunk, hidden)
+            mask = attn_chunk.unsqueeze(-1)               # (chunk, seq_len, 1)
+            cls_vec = (last_hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)  # (chunk, hidden)
             pooled_chunks.append(cls_vec)
 
         pooled_flat = torch.cat(pooled_chunks, dim=0)      # (B*M, hidden)
         hidden_size = pooled_flat.size(-1)
-        pooled_visits = pooled_flat.view(B, M, hidden_size)  # (B, M, hidden)
+        proj = pooled_flat.view(B, M, hidden_size)  # (B, M, hidden)
+
+        # project
+        # proj = self.project(pooled_visits)  # (B, M, lstm_hidden)
+        
+        if visit_times is not None:
+            # visit_time shape: (B, M, visit_time_proj)
+            visit_time_proj = self.visit_feat_proj(visit_times)  # (B, M, visit_time_proj)
+            proj = torch.cat([proj, visit_time_proj], dim=-1)
 
         # mask padded visits (B, M)
-        visit_mask = visit_exists.view(B, M).to(pooled_visits.dtype)  # 1.0 for real visits, 0.0 for padded visits
+        visit_mask = visit_exists.view(B, M).to(proj.dtype)  # 1.0 for real visits, 0.0 for padded visits
         visit_mask_bool = visit_mask.to(torch.bool)  # for masking scores
 
         # compute lengths (number of real visits per sample)
@@ -185,10 +211,11 @@ class LSTMBERT(RobertaForSequenceClassification):
         ## After processing, we pad back to a full batch shape so we can index and work normally.
         # Note: pack_padded_sequence expects CPU lengths
         from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
-        packed = pack_padded_sequence(pooled_visits, lengths_clamped.cpu(), batch_first=True, enforce_sorted=False) # remove padding in order to avoid LSTM processing the padded visits: "After visit X, stop reading, remaining visits are padding"
+        packed = pack_padded_sequence(proj, lengths_clamped.cpu(), batch_first=True, enforce_sorted=False) # remove padding in order to avoid LSTM processing the padded visits: "After visit X, stop reading, remaining visits are padding"
         packed_out, (h_n, c_n) = self.lstm(packed)
         out_unpacked, _ = pad_packed_sequence(packed_out, batch_first=True, total_length=M)  # convert back to (B, M, 2*lstm_hidden)
 
+        attn_weights_list = []        
         if self.use_attn:
             # Attention pooling over the M timesteps (visits)
             # compute raw scores (B, M, 1)
@@ -196,6 +223,9 @@ class LSTMBERT(RobertaForSequenceClassification):
             # mask padded positions: set to large negative so softmax ~ 0
             scores = scores.masked_fill(~visit_mask_bool, -1e9)
             weights = torch.softmax(scores, dim=1)  # (B, M)
+            if get_attn_weights:
+                attn_weights_list += weights.cpu().numpy().tolist()
+            attn_entropy = -(weights * torch.log(weights + 1e-8)).sum(dim=1).mean()*0.1
             # weighted sum
             weights_unsq = weights.unsqueeze(-1)  # (B, M, 1)
             pooled = (weights_unsq * out_unpacked).sum(dim=1)  # (B, 2*lstm_hidden)
@@ -203,27 +233,16 @@ class LSTMBERT(RobertaForSequenceClassification):
         else:
             # gather last valid timestep for each sequence (lengths_clamped - 1)
             last_idxs = (lengths_clamped - 1).to(torch.long)  # (B,)
-            batch_idx = torch.arange(B, device=pooled_visits.device)
+            batch_idx = torch.arange(B, device=proj.device)
             pooled = out_unpacked[batch_idx, last_idxs, :]  # (B, 2*lstm_hidden)
 
         x = self.dropout(pooled)  # (B, 2*lstm_hidden)
 
         logits = [head(x) for head in self.classifier]    # each element (B, output_dim)
 
-        total_loss, card_loss, dig_loss = self.compute_multitask_loss(logits, card_labels, dig_labels)
+        total_loss = self.loss_fct(logits[0], labels) + attn_entropy if self.use_attn else self.loss_fct(logits[0], labels)
 
-        return (SequenceClassifierOutput(
+        return SequenceClassifierOutput(
             loss=total_loss,
             logits=logits
-        ), card_loss, dig_loss)
-
-    def compute_multitask_loss(self, task_logits, card_labels, dig_labels, weights=(1.0, 1.0)):
-        """
-        task_logits: list [logits_card, logits_dig] each shape (B, 2)
-        card_labels, dig_labels: (B,) long (0/1)
-        weights: tuple of floats to weight task losses
-        """
-        card_loss = self.loss_fct(task_logits[0], card_labels.unsqueeze(1))
-        dig_loss = self.loss_fct(task_logits[1], dig_labels.unsqueeze(1))
-        total_loss = weights[0] * card_loss + weights[1] * dig_loss
-        return total_loss, card_loss, dig_loss
+        ), attn_weights_list

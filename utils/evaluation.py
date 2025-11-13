@@ -105,4 +105,50 @@ def multilabel_eval(y_true: np.ndarray, y_pred: np.ndarray, logger, target_names
         'val_weighted_f1': metrics_report['Subset']['weighted avg']['f1-score'],
     }
     return metrics_report
+
+
+def singlelabel_eval(y_true: np.ndarray, y_pred: np.ndarray, logger, target_names=None, print_metrics=True) -> Dict:
+    """
+    Evaluate a single-label multi-class classification task.
+
+    Args:
+        y_true (np.ndarray): shape (n_samples,), ground truth.
+        y_pred (np.ndarray): shape (n_samples,), predictions.
+        target_names (list): optional, names of each class.
+    Prints:
+        - classification report per class
+        - micro F1
+        - macro F1
+        - accuracy
+    """
+    n_classes = len(np.unique(y_true))
+    if target_names is None:
+        target_names = [f"Class {i}" for i in range(n_classes)]
+
+    if print_metrics: logger.info("=== Classification report ===")
+    metrics_report = {}
+    metrics_report['Overall'] = classification_report(
+        y_true,
+        y_pred,
+        zero_division=0,
+        target_names=target_names, 
+        output_dict=True
+    )
+    if print_metrics:
+        logger.info(
+            classification_report(
+                y_true,
+                y_pred,
+                zero_division=0,
+                target_names=target_names
+            )
+        )
+
+    metrics_report['es'] = {
+        'val_loss': None,
+        'val_accuracy': metrics_report['Overall']['accuracy'],
+        'val_macro_f1': metrics_report['Overall']['macro avg']['f1-score'],
+        'val_weighted_f1': metrics_report['Overall']['weighted avg']['f1-score'],
+    }
+    return metrics_report
     
