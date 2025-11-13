@@ -4,7 +4,7 @@ import logging
 
 def setup_logger(dir_name, args):
     date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-    log_path = Path(dir_name, args.action, f"{date}.log")
+    log_path = Path(dir_name, args.action, args.method, f"{date}.log")
     Path(log_path).parent.mkdir(parents=True, exist_ok=True)
 
     logging.basicConfig(
